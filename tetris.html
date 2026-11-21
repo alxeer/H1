@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>تتريس</title>
+<style>
+  :root{
+    --bg:#14213d;
+    --panel:#1d2f55;
+    --ink:#f1f5f9;
+    --muted:#9fb0cf;
+    --accent:#fca311;
+    --grid:#223863;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:"Segoe UI",Tahoma,"Noto Naskh Arabic",Arial,sans-serif;
+    display:flex;align-items:center;justify-content:center;
+    padding:12px;
+  }
+  .game{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;justify-content:center}
+  .board-wrap{position:relative}
+  canvas{display:block;background:#0e1830;border:3px solid var(--panel);border-radius:6px}
+  .side{width:150px;display:flex;flex-direction:column;gap:12px}
+  .box{background:var(--panel);border-radius:8px;padding:10px 12px}
+  .box h3{margin:0 0 6px;font-size:14px;font-weight:600;color:var(--muted)}
+  .box .val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+  #next{display:block;margin:0 auto;background:transparent;border:none}
+  button{
+    font:inherit;font-weight:700;border:0;border-radius:8px;padding:10px;
+    background:var(--accent);color:#14213d;cursor:pointer;
+  }
+  button:focus-visible{outline:3px solid #fff;outline-offset:2px}
+  .overlay{
+    position:absolute;inset:0;display:flex;flex-direction:column;gap:10px;
+    align-items:center;justify-content:center;text-align:center;
+    background:rgba(14,24,48,.82);border-radius:6px;padding:16px;
+  }
+  .overlay h2{margin:0;font-size:28px}
+  .overlay p{margin:0;color:var(--muted);font-size:14px;line-height:1.7}
+  .hidden{display:none}
+  .help{font-size:12px;color:var(--muted);line-height:1.9}
+  .touch{display:none;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px;width:100%}
+  .touch button{padding:14px 0;font-size:20px}
+  @media (pointer:coarse){.touch{display:grid}.help.keys{display:none}}
+  @media (max-width:520px){.side{width:100%;flex-direction:row;flex-wrap:wrap}.side .box{flex:1;min-width:90px}}
+</style>
+</head>
+<body>
+<div class="game">
+  <div>
+    <div class="board-wrap">
+      <canvas id="board" width="300" height="600"></canvas>
+      <div id="overlay" class="overlay">
+        <h2 id="ovTitle">تتريس</h2>
+        <p id="ovText">رتّب القطع لتكوين صفوف كاملة</p>
+        <button id="startBtn">ابدأ اللعب</button>
+      </div>
+    </div>
+    <div class="touch" id="touch">
+      <button data-a="left" aria-label="يسار">◀</button>
+      <button data-a="rotate" aria-label="تدوير">⟳</button>
+      <button data-a="right" aria-label="يمين">▶</button>
+      <button data-a="drop" aria-label="إسقاط">⤓</button>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="box"><h3>النقاط</h3><div class="val" id="score">0</div></div>
+    <div class="box"><h3>الصفوف</h3><div class="val" id="lines">0</div></div>
+    <div class="box"><h3>المستوى</h3><div class="val" id="level">1</div></div>
+    <div class="box"><h3>القطعة التالية</h3><canvas id="next" width="120" height="90"></canvas></div>
+    <div class="box help keys">
+      ← → : تحريك<br>
+      ↑ : تدوير<br>
+      ↓ : نزول أسرع<br>
+      مسافة : إسقاط فوري<br>
+      P : إيقاف مؤقت
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const COLS = 10, ROWS = 20, SZ = 30;
+  const cv = document.getElementById('board'), ctx = cv.getContext('2d');
+  const nx = document.getElementById('next'), nctx = nx.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  const SHAPES = {
+    I:[[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+    O:[[1,1],[1,1]],
+    T:[[0,1,0],[1,1,1],[0,0,0]],
+    S:[[0,1,1],[1,1,0],[0,0,0]],
+    Z:[[1,1,0],[0,1,1],[0,0,0]],
+    J:[[1,0,0],[1,1,1],[0,0,0]],
+    L:[[0,0,1],[1,1,1],[0,0,0]]
+  };
+  const COLORS = {I:'#4cc9f0',O:'#fca311',T:'#b388eb',S:'#80ed99',Z:'#ef476f',J:'#4895ef',L:'#ff9f6e'};
+  const POINTS = [0,100,300,500,800];
+
+  let grid, piece, nextType, bag = [];
+  let score, lines, level, dropMs, last, acc, running, paused, over, raf;
+
+  const emptyGrid = () => Array.from({length:ROWS}, () => Array(COLS).fill(null));
+
+  function nextFromBag(){
+    if(!bag.length){
+      bag = Object.keys(SHAPES);
+      for(let i=bag.length-1;i>0;i--){
+        const j = Math.floor(Math.random()*(i+1));
+        [bag[i],bag[j]] = [bag[j],bag[i]];
+      }
+    }
+    return bag.pop();
+  }
+
+  function spawn(){
+    const type = nextType || nextFromBag();
+    nextType = nextFromBag();
+    const m = SHAPES[type].map(r => r.slice());
+    piece = {type, m, x: Math.floor((COLS - m[0].length)/2), y: 0};
+    drawNext();
+    if(collides(piece.m, piece.x, piece.y)) endGame();
+  }
+
+  function collides(m, px, py){
+    for(let y=0;y<m.length;y++) for(let x=0;x<m[y].length;x++){
+      if(!m[y][x]) continue;
+      const gx = px+x, gy = py+y;
+      if(gx<0 || gx>=COLS || gy>=ROWS) return true;
+      if(gy>=0 && grid[gy][gx]) return true;
+    }
+    return false;
+  }
+
+  function rotate(m){
+    const n = m.length;
+    const r = Array.from({length:n}, () => Array(n).fill(0));
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++) r[x][n-1-y] = m[y][x];
+    return r;
+  }
+
+  function tryRotate(){
+    if(piece.type==='O') return;
+    const r = rotate(piece.m);
+    for(const k of [0,-1,1,-2,2]){
+      if(!collides(r, piece.x+k, piece.y)){ piece.m = r; piece.x += k; return; }
+    }
+  }
+
+  function move(dx){
+    if(!collides(piece.m, piece.x+dx, piece.y)) piece.x += dx;
+  }
+
+  function lock(){
+    piece.m.forEach((row,y) => row.forEach((v,x) => {
+      if(v && piece.y+y>=0) grid[piece.y+y][piece.x+x] = piece.type;
+    }));
+    let cleared = 0;
+    for(let y=ROWS-1;y>=0;y--){
+      if(grid[y].every(c => c)){
+        grid.splice(y,1);
+        grid.unshift(Array(COLS).fill(null));
+        cleared++; y++;
+      }
+    }
+    if(cleared){
+      score += POINTS[cleared]*level;
+      lines += cleared;
+      level = Math.floor(lines/10)+1;
+      dropMs = Math.max(90, 800 - (level-1)*70);
+      updateHUD();
+    }
+    spawn();
+  }
+
+  function softDrop(){
+    if(!collides(piece.m, piece.x, piece.y+1)){ piece.y++; return true; }
+    lock(); return false;
+  }
+
+  function hardDrop(){
+    let d = 0;
+    while(!collides(piece.m, piece.x, piece.y+1)){ piece.y++; d++; }
+    score += d*2;
+    updateHUD();
+    lock();
+  }
+
+  function ghostY(){
+    let y = piece.y;
+    while(!collides(piece.m, piece.x, y+1)) y++;
+    return y;
+  }
+
+  function cell(c, x, y, type, a=1){
+    c.globalAlpha = a;
+    c.fillStyle = COLORS[type];
+    c.fillRect(x*SZ+1, y*SZ+1, SZ-2, SZ-2);
+    c.fillStyle = 'rgba(255,255,255,.28)';
+    c.fillRect(x*SZ+1, y*SZ+1, SZ-2, 4);
+    c.fillStyle = 'rgba(0,0,0,.22)';
+    c.fillRect(x*SZ+1, y*SZ+SZ-5, SZ-2, 4);
+    c.globalAlpha = 1;
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    ctx.strokeStyle = '#1a2b50'; ctx.lineWidth = 1;
+    for(let x=1;x<COLS;x++){ctx.beginPath();ctx.moveTo(x*SZ+.5,0);ctx.lineTo(x*SZ+.5,cv.height);ctx.stroke();}
+    for(let y=1;y<ROWS;y++){ctx.beginPath();ctx.moveTo(0,y*SZ+.5);ctx.lineTo(cv.width,y*SZ+.5);ctx.stroke();}
+    for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(grid[y][x]) cell(ctx,x,y,grid[y][x]);
+    if(piece && !over){
+      const gy = ghostY();
+      piece.m.forEach((row,y) => row.forEach((v,x) => { if(v) cell(ctx,piece.x+x,gy+y,piece.type,.22); }));
+      piece.m.forEach((row,y) => row.forEach((v,x) => { if(v && piece.y+y>=0) cell(ctx,piece.x+x,piece.y+y,piece.type); }));
+    }
+  }
+
+  function drawNext(){
+    nctx.clearRect(0,0,nx.width,nx.height);
+    const m = SHAPES[nextType], s = 24;
+    const w = m[0].length*s, h = m.length*s;
+    const ox = (nx.width-w)/2, oy = (nx.height-h)/2;
+    m.forEach((row,y) => row.forEach((v,x) => {
+      if(!v) return;
+      nctx.fillStyle = COLORS[nextType];
+      nctx.fillRect(ox+x*s+1, oy+y*s+1, s-2, s-2);
+      nctx.fillStyle = 'rgba(255,255,255,.28)';
+      nctx.fillRect(ox+x*s+1, oy+y*s+1, s-2, 3);
+    }));
+  }
+
+  function updateHUD(){
+    $('score').textContent = score;
+    $('lines').textContent = lines;
+    $('level').textContent = level;
+  }
+
+  function loop(t){
+    if(!running) return;
+    if(!paused){
+      acc += t - last;
+      while(acc >= dropMs && running){ acc -= dropMs; softDrop(); }
+      draw();
+    }
+    last = t;
+    raf = requestAnimationFrame(loop);
+  }
+
+  function showOverlay(title, text, btn){
+    $('ovTitle').textContent = title;
+    $('ovText').textContent = text;
+    $('startBtn').textContent = btn;
+    $('overlay').classList.remove('hidden');
+  }
+
+  function start(){
+    cancelAnimationFrame(raf);
+    grid = emptyGrid(); score = 0; lines = 0; level = 1; dropMs = 800;
+    acc = 0; over = false; paused = false; running = true; bag = []; nextType = null;
+    updateHUD();
+    $('overlay').classList.add('hidden');
+    spawn();
+    last = performance.now();
+    raf = requestAnimationFrame(loop);
+  }
+
+  function endGame(){
+    over = true; running = false;
+    draw();
+    showOverlay('انتهت اللعبة', 'نتيجتك: ' + score + ' نقطة', 'العب مرة أخرى');
+  }
+
+  function togglePause(){
+    if(!running) return;
+    paused = !paused;
+    if(paused) showOverlay('متوقف مؤقتًا', 'اضغط P أو الزر للمتابعة', 'متابعة');
+    else { $('overlay').classList.add('hidden'); last = performance.now(); }
+  }
+
+  $('startBtn').addEventListener('click', () => {
+    if(running && paused) togglePause(); else start();
+  });
+
+  document.addEventListener('keydown', e => {
+    if(e.code === 'KeyP'){ togglePause(); return; }
+    if(!running || paused) return;
+    switch(e.code){
+      case 'ArrowLeft': move(-1); break;
+      case 'ArrowRight': move(1); break;
+      case 'ArrowDown': if(softDrop()){score++;updateHUD();} acc = 0; break;
+      case 'ArrowUp': tryRotate(); break;
+      case 'Space': hardDrop(); break;
+      default: return;
+    }
+    e.preventDefault(); draw();
+  });
+
+  document.getElementById('touch').addEventListener('click', e => {
+    const a = e.target.closest('button')?.dataset.a;
+    if(!a || !running || paused) return;
+    if(a==='left') move(-1);
+    if(a==='right') move(1);
+    if(a==='rotate') tryRotate();
+    if(a==='drop') hardDrop();
+    draw();
+  });
+
+  grid = emptyGrid(); score = lines = 0; level = 1; running = false;
+  nextType = 'T'; drawNext(); draw();
+})();
+</script>
+</body>
+</html>
